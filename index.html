@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>QR出席スキャナ</title>
+  <script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100vw; height: 100vh;
+      overflow: hidden;
+      background: #000;
+      font-family: sans-serif;
+    }
+    #container {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+    }
+    video {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      object-fit: cover;
+    }
+    #overlay {
+      position: absolute;
+      top: 50%; left: 50%;
+      width: 60vw; max-width: 400px;
+      height: 60vw; max-height: 400px;
+      transform: translate(-50%, -50%);
+      border: 4px dashed rgba(0,255,0,0.7);
+      z-index: 10;
+      pointer-events: none;
+    }
+    #backdrop {
+      position: absolute; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      background: rgba(0,0,0,0.6);
+      opacity: 0;
+      transition: opacity 0.2s;
+      z-index: 20;
+      pointer-events: none;
+    }
+    #status {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%,-50%) scale(0.8);
+      background: #fff;
+      color: #333;
+      padding: 20px 30px;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+      display: flex;
+      align-items: center;
+      opacity: 0;
+      transition: opacity 0.2s, transform 0.2s;
+      z-index: 21;
+    }
+    #status.show {
+      opacity: 1;
+      transform: translate(-50%,-50%) scale(1);
+    }
+    #status .icon { font-size: 2em; margin-right: 0.6em; }
+    #status .text { font-size: 1.2em; }
+    #error-banner {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      background: rgba(220, 50, 50, 0.95);
+      color: #fff;
+      padding: 16px 20px;
+      font-size: 14px;
+      line-height: 1.5;
+      z-index: 30;
+      display: none;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <video id="video" autoplay muted playsinline></video>
+    <div id="overlay"></div>
+    <div id="backdrop"></div>
+    <div id="status">
+      <span class="icon"></span>
+      <span class="text"></span>
+    </div>
+    <div id="error-banner"></div>
+  </div>
+
+  <script>
+    /* ============================================================
+     * ★ここに GAS Web アプリの URL を貼り付けてください
+     * （デプロイ → 新しいデプロイ で取得した URL）
+     * ============================================================ */
+    const GAS_URL = 'https://script.google.com/macros/s/AKfycbxBsc-V4H6M2LhphtKBf1ioO4DtEExY4ujza2htTLQjEmAwTs33ueCvTuRG9oJi1wIYMA/exec';
+
+    const { BrowserQRCodeReader, NotFoundException } = ZXing;
+    const video       = document.getElementById('video');
+    const backdrop    = document.getElementById('backdrop');
+    const statusEl    = document.getElementById('status');
+    const iconEl      = statusEl.querySelector('.icon');
+    const textEl      = statusEl.querySelector('.text');
+    const errorBanner = document.getElementById('error-banner');
+
+    let busy = false;
+    let reader = null;
+    let currentStream = null;
+
+    /* ─── カメラ初期化 ─── */
+    async function initCamera() {
+      try {
+        currentStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        });
+      } catch (err) {
+        showError(
+          'カメラの起動に失敗しました。\n' +
+          'エラー: ' + err.name + ' - ' + err.message + '\n\n' +
+          '【対処法】\n' +
+          '・アドレスバー左のカメラアイコンから許可を確認\n' +
+          '・Chrome 設定 → プライバシー → サイトの設定 → カメラ'
+        );
+        return;
+      }
+      video.srcObject = currentStream;
+      await video.play().catch(() => {});
+      reader = new BrowserQRCodeReader();
+      startScan();
+    }
+
+    /* ─── ZXing スキャン開始 ─── */
+    function startScan() {
+      reader.decodeFromStream(currentStream, video, (result, err) => {
+        if (result && !busy) {
+          busy = true;
+          reader.reset();
+          processResult(result.getText());
+        }
+        if (err && !(err instanceof NotFoundException)) {
+          console.error('ZXing:', err);
+        }
+      });
+    }
+
+    /* ─── 再スキャン ─── */
+    async function restartScan() {
+      try {
+        currentStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        });
+        video.srcObject = currentStream;
+        await video.play().catch(() => {});
+        reader = new BrowserQRCodeReader();
+        startScan();
+      } catch (err) {
+        showError('カメラ再起動失敗: ' + err.message);
+      }
+    }
+
+    /* ─── QR読取 → GAS に送信 ─── */
+    async function processResult(text) {
+      showDialog('check', '出席確認中…');
+
+      try {
+        const url = GAS_URL
+          + '?action=append'
+          + '&data=' + encodeURIComponent(text);
+
+        const res = await fetch(url, { redirect: 'follow' });
+
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+
+        const json = await res.json();
+
+        if (json.status === 'ok') {
+          showDialog('check', '出席確認完了');
+        } else {
+          showDialog('warn', '書込エラー: ' + (json.message || ''));
+        }
+      } catch (err) {
+        console.error('送信エラー:', err);
+        showDialog('warn', '通信失敗: ' + err.message);
+      }
+
+      setTimeout(() => {
+        hideDialog();
+        busy = false;
+        restartScan();
+      }, 1200);
+    }
+
+    /* ─── UI ─── */
+    function showDialog(type, message) {
+      iconEl.textContent = type === 'check' ? '\u2705' : '\u26A0\uFE0F';
+      textEl.textContent = message;
+      backdrop.style.opacity = '1';
+      statusEl.classList.add('show');
+    }
+    function hideDialog() {
+      statusEl.classList.remove('show');
+      backdrop.style.opacity = '0';
+    }
+    function showError(msg) {
+      errorBanner.textContent = msg;
+      errorBanner.style.display = 'block';
+      console.error(msg);
+    }
+
+    /* ─── 起動 ─── */
+    initCamera();
+  </script>
+</body>
+</html>
