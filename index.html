@@ -1,69 +1,100 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>QR出席スキャナ</title>
   <script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
   <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body {
       margin: 0; padding: 0;
       width: 100vw; height: 100vh;
       overflow: hidden;
       background: #000;
-      font-family: sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                   "Yu Gothic UI", "Meiryo", sans-serif;
+      color: #fff;
     }
-    #container {
-      position: fixed;
-      top: 0; left: 0;
-      width: 100vw; height: 100vh;
-    }
+
+    /* ========== カメラ ========== */
+    #container { position: fixed; inset: 0; }
     video {
-      position: absolute;
-      top: 0; left: 0;
+      position: absolute; inset: 0;
       width: 100vw; height: 100vh;
       object-fit: cover;
     }
     #overlay {
       position: absolute;
       top: 50%; left: 50%;
-      width: 60vw; max-width: 400px;
-      height: 60vw; max-height: 400px;
       transform: translate(-50%, -50%);
-      border: 4px dashed rgba(0,255,0,0.7);
-      z-index: 10;
+      width: min(70vw, 70vh);
+      height: min(70vw, 70vh);
+      border: 3px dashed rgba(0, 255, 100, 0.85);
+      border-radius: 16px;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.35);
+      z-index: 5;
       pointer-events: none;
     }
-    #backdrop {
-      position: absolute; top: 0; left: 0;
-      width: 100vw; height: 100vh;
-      background: rgba(0,0,0,0.6);
+
+    /* ========== 「確認中」全画面オーバーレイ ========== */
+    .processing {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(15, 23, 42, .92);
+      z-index: 25;
       opacity: 0;
-      transition: opacity 0.2s;
-      z-index: 20;
+      transition: opacity .15s ease;
       pointer-events: none;
     }
-    #status {
-      position: absolute;
-      top: 50%; left: 50%;
-      transform: translate(-50%,-50%) scale(0.8);
-      background: #fff;
-      color: #333;
-      padding: 20px 30px;
-      border-radius: 8px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-      display: flex;
-      align-items: center;
+    .processing.show { opacity: 1; pointer-events: auto; }
+    .processing .label {
+      font-size: clamp(40px, 11vw, 96px);
+      font-weight: 900;
+      letter-spacing: .08em;
+      color: #fff;
+      text-align: center;
+      padding: 0 16px;
+      text-shadow: 0 6px 30px rgba(0,0,0,.4);
+      animation: pulse 1.0s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1);     opacity: 1;   }
+      50%      { transform: scale(1.06);  opacity: .82; }
+    }
+
+    /* ========== 結果オーバーレイ ========== */
+    .result {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 24px;
+      z-index: 30;
       opacity: 0;
-      transition: opacity 0.2s, transform 0.2s;
-      z-index: 21;
+      transition: opacity .2s ease;
+      pointer-events: none;
     }
-    #status.show {
-      opacity: 1;
-      transform: translate(-50%,-50%) scale(1);
+    .result.show { opacity: 1; pointer-events: auto; }
+    .result.ok    { background: linear-gradient(135deg, #10b981, #059669); }
+    .result.warn  { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+    .result .icon {
+      font-size: clamp(64px, 18vw, 130px);
+      line-height: 1;
+      margin-bottom: 18px;
     }
-    #status .icon { font-size: 2em; margin-right: 0.6em; }
-    #status .text { font-size: 1.2em; }
+    .result .text {
+      font-size: clamp(28px, 7vw, 52px);
+      font-weight: 900;
+      letter-spacing: .06em;
+      text-align: center;
+      line-height: 1.3;
+      padding: 0 12px;
+      text-shadow: 0 6px 30px rgba(0,0,0,.25);
+      word-break: break-word;
+    }
+
+    /* ========== エラーバナー ========== */
     #error-banner {
       position: absolute;
       top: 0; left: 0; right: 0;
@@ -72,7 +103,7 @@
       padding: 16px 20px;
       font-size: 14px;
       line-height: 1.5;
-      z-index: 30;
+      z-index: 50;
       display: none;
       white-space: pre-wrap;
       word-break: break-all;
@@ -83,11 +114,18 @@
   <div id="container">
     <video id="video" autoplay muted playsinline></video>
     <div id="overlay"></div>
-    <div id="backdrop"></div>
-    <div id="status">
-      <span class="icon"></span>
-      <span class="text"></span>
+
+    <!-- 確認中オーバーレイ -->
+    <div class="processing" id="processing">
+      <div class="label" id="processingLabel"></div>
     </div>
+
+    <!-- 結果オーバーレイ -->
+    <div class="result" id="result">
+      <div class="icon" id="resultIcon"></div>
+      <div class="text" id="resultText"></div>
+    </div>
+
     <div id="error-banner"></div>
   </div>
 
@@ -98,19 +136,29 @@
      * ============================================================ */
     const GAS_URL = 'https://script.google.com/macros/s/AKfycbxBsc-V4H6M2LhphtKBf1ioO4DtEExY4ujza2htTLQjEmAwTs33ueCvTuRG9oJi1wIYMA/exec';
 
+    /* ---- 速度パラメータ ---- */
+    const RESULT_HOLD_MS  = 700;    // 成功表示を出してから次の読み取りまでの保持時間
+    const ERROR_HOLD_MS   = 1500;   // エラー表示の保持時間
+    const CLIENT_GUARD_MS = 2500;   // 同一QRの即時連投防止
+    const REQ_TIMEOUT_MS  = 15000;  // 通信タイムアウト
+    const SCAN_INTERVAL_MS = 120;   // ZXing の読み取り間隔（短いほど高速）
+
     const { BrowserQRCodeReader, NotFoundException } = ZXing;
     const video       = document.getElementById('video');
-    const backdrop    = document.getElementById('backdrop');
-    const statusEl    = document.getElementById('status');
-    const iconEl      = statusEl.querySelector('.icon');
-    const textEl      = statusEl.querySelector('.text');
+    const processingEl = document.getElementById('processing');
+    const processingLabel = document.getElementById('processingLabel');
+    const resultEl    = document.getElementById('result');
+    const resultIcon  = document.getElementById('resultIcon');
+    const resultText  = document.getElementById('resultText');
     const errorBanner = document.getElementById('error-banner');
 
     let busy = false;
     let reader = null;
     let currentStream = null;
+    let lastCode = '';
+    let lastCodeAt = 0;
 
-    /* ─── カメラ初期化 ─── */
+    /* ─── カメラ初期化（最初の1回だけ getUserMedia）─── */
     async function initCamera() {
       try {
         currentStream = await navigator.mediaDevices.getUserMedia({
@@ -130,16 +178,27 @@
       video.srcObject = currentStream;
       await video.play().catch(() => {});
       reader = new BrowserQRCodeReader();
+      reader.timeBetweenScansMillis = SCAN_INTERVAL_MS;
       startScan();
     }
 
     /* ─── ZXing スキャン開始 ─── */
     function startScan() {
       reader.decodeFromStream(currentStream, video, (result, err) => {
-        if (result && !busy) {
+        if (busy) return;
+        if (result) {
+          const text = result.getText();
+          const now = Date.now();
+          // 同一QRの短時間連投ガード（先にロックして二重侵入を遮断）
+          if (text === lastCode && now - lastCodeAt < CLIENT_GUARD_MS) return;
+
           busy = true;
-          reader.reset();
-          processResult(result.getText());
+          lastCode = text;
+          lastCodeAt = now;
+
+          try { reader.reset(); } catch (e) {}
+          processResult(text);
+          return;
         }
         if (err && !(err instanceof NotFoundException)) {
           console.error('ZXing:', err);
@@ -147,16 +206,23 @@
       });
     }
 
-    /* ─── 再スキャン ─── */
-    async function restartScan() {
+    /* ─── 再スキャン（カメラは止めず、読み取りだけ再開）─── */
+    async function resumeScan() {
+      // ストリームが生きていればそのまま読み取りを再開（getUserMedia を呼ばない＝高速）
+      const live = currentStream &&
+                   currentStream.getVideoTracks().some(t => t.readyState === 'live');
       try {
-        currentStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
-          audio: false
-        });
-        video.srcObject = currentStream;
-        await video.play().catch(() => {});
-        reader = new BrowserQRCodeReader();
+        if (!live) {
+          // 万一カメラが停止していた場合のみ取り直す
+          currentStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' } },
+            audio: false
+          });
+          video.srcObject = currentStream;
+          await video.play().catch(() => {});
+        }
+        if (!reader) reader = new BrowserQRCodeReader();
+        reader.timeBetweenScansMillis = SCAN_INTERVAL_MS;
         startScan();
       } catch (err) {
         showError('カメラ再起動失敗: ' + err.message);
@@ -165,46 +231,71 @@
 
     /* ─── QR読取 → GAS に送信 ─── */
     async function processResult(text) {
-      showDialog('check', '出席確認中…');
+      showProcessing('出席確認中…');
 
+      let json = null;
       try {
         const url = GAS_URL
           + '?action=append'
           + '&data=' + encodeURIComponent(text);
 
-        const res = await fetch(url, { redirect: 'follow' });
-
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-
-        const json = await res.json();
-
-        if (json.status === 'ok') {
-          showDialog('check', '出席確認完了');
-        } else {
-          showDialog('warn', '書込エラー: ' + (json.message || ''));
-        }
+        json = await fetchWithTimeout(url, REQ_TIMEOUT_MS);
       } catch (err) {
         console.error('送信エラー:', err);
-        showDialog('warn', '通信失敗: ' + err.message);
+        hideProcessing();
+        showResult('warn', '通信失敗: ' + err.message);
+        finishCycle(ERROR_HOLD_MS);
+        return;
       }
 
+      hideProcessing();
+
+      if (json && json.status === 'ok') {
+        showResult('check', '出席確認完了');
+        finishCycle(RESULT_HOLD_MS);
+      } else {
+        showResult('warn', '書込エラー: ' + ((json && json.message) || ''));
+        finishCycle(ERROR_HOLD_MS);
+      }
+    }
+
+    async function fetchWithTimeout(url, ms) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ms);
+      try {
+        const res = await fetch(url, { redirect: 'follow', signal: ctrl.signal });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    /* ─── 1サイクル終了 → 結果を隠して次の読み取りへ ─── */
+    function finishCycle(wait) {
       setTimeout(() => {
-        hideDialog();
+        hideResult();
         busy = false;
-        restartScan();
-      }, 1200);
+        resumeScan();
+      }, wait);
     }
 
     /* ─── UI ─── */
-    function showDialog(type, message) {
-      iconEl.textContent = type === 'check' ? '\u2705' : '\u26A0\uFE0F';
-      textEl.textContent = message;
-      backdrop.style.opacity = '1';
-      statusEl.classList.add('show');
+    function showProcessing(message) {
+      processingLabel.textContent = message;
+      processingEl.classList.add('show');
     }
-    function hideDialog() {
-      statusEl.classList.remove('show');
-      backdrop.style.opacity = '0';
+    function hideProcessing() {
+      processingEl.classList.remove('show');
+    }
+    function showResult(type, message) {
+      resultIcon.textContent = type === 'check' ? '✅' : '⚠️';
+      resultText.textContent = message;
+      resultEl.classList.remove('ok', 'warn');
+      resultEl.classList.add(type === 'check' ? 'ok' : 'warn', 'show');
+    }
+    function hideResult() {
+      resultEl.classList.remove('show');
     }
     function showError(msg) {
       errorBanner.textContent = msg;
