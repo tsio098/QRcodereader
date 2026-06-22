@@ -140,7 +140,9 @@
     const RESULT_HOLD_MS  = 700;    // 成功表示を出してから次の読み取りまでの保持時間
     const ERROR_HOLD_MS   = 1500;   // エラー表示の保持時間
     const CLIENT_GUARD_MS = 2500;   // 同一QRの即時連投防止
-    const REQ_TIMEOUT_MS  = 15000;  // 通信タイムアウト
+    const REQ_TIMEOUT_MS  = 8000;   // 1回あたりの通信タイムアウト
+    const MAX_ATTEMPTS    = 3;      // 失敗時の再試行回数（この間はエラー画面を出さない）
+    const RETRY_DELAY_MS  = 600;    // 再試行の間隔
     const SCAN_INTERVAL_MS = 120;   // ZXing の読み取り間隔（短いほど高速）
 
     const { BrowserQRCodeReader, NotFoundException } = ZXing;
@@ -233,30 +235,45 @@
     async function processResult(text) {
       showProcessing('出席確認中…');
 
-      let json = null;
-      try {
-        const url = GAS_URL
-          + '?action=append'
-          + '&data=' + encodeURIComponent(text);
+      let lastErrMsg = '';
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        let json = null;
+        try {
+          const url = GAS_URL
+            + '?action=append'
+            + '&data=' + encodeURIComponent(text);
 
-        json = await fetchWithTimeout(url, REQ_TIMEOUT_MS);
-      } catch (err) {
-        console.error('送信エラー:', err);
+          json = await fetchWithTimeout(url, REQ_TIMEOUT_MS);
+
+          if (json && json.status === 'ok') {
+            hideProcessing();
+            showResult('check', '出席確認完了');
+            finishCycle(RESULT_HOLD_MS);
+            return;
+          }
+          lastErrMsg = '書込エラー: ' + ((json && json.message) || '');
+        } catch (err) {
+          console.error('送信エラー:', err);
+          lastErrMsg = '通信失敗: ' + err.message;
+        }
+
+        // 試行回数が残っていれば、エラー画面を出さず「出席確認中…」のまま再試行する。
+        // （行追加・ロック待ちなどでサーバーが一時的に遅い間のエラー表示を防ぐ）
+        if (attempt < MAX_ATTEMPTS) {
+          await sleep(RETRY_DELAY_MS);
+          continue;
+        }
+
+        // すべての試行が失敗したときだけエラーを表示
         hideProcessing();
-        showResult('warn', '通信失敗: ' + err.message);
+        showResult('warn', lastErrMsg);
         finishCycle(ERROR_HOLD_MS);
         return;
       }
+    }
 
-      hideProcessing();
-
-      if (json && json.status === 'ok') {
-        showResult('check', '出席確認完了');
-        finishCycle(RESULT_HOLD_MS);
-      } else {
-        showResult('warn', '書込エラー: ' + ((json && json.message) || ''));
-        finishCycle(ERROR_HOLD_MS);
-      }
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     async function fetchWithTimeout(url, ms) {
