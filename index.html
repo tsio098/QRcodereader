@@ -184,7 +184,11 @@
       startScan();
     }
 
-    /* ─── ZXing スキャン開始 ─── */
+    /* ─── ZXing スキャン開始（一度だけ起動し、以降は止めずに連続稼働）───
+     *  reader.reset() はカメラのトラックを停止してしまうため毎回呼ばない。
+     *  読み取り後は busy フラグで受付を止めるだけにし、カメラは生かしたまま。
+     *  これにより 1スキャンごとの getUserMedia（カメラ再取得＝数秒）が不要になる。
+     */
     function startScan() {
       reader.decodeFromStream(currentStream, video, (result, err) => {
         if (busy) return;
@@ -194,11 +198,10 @@
           // 同一QRの短時間連投ガード（先にロックして二重侵入を遮断）
           if (text === lastCode && now - lastCodeAt < CLIENT_GUARD_MS) return;
 
-          busy = true;
+          busy = true;            // 受付を止める（カメラ・デコーダは動かしたまま）
           lastCode = text;
           lastCodeAt = now;
 
-          try { reader.reset(); } catch (e) {}
           processResult(text);
           return;
         }
@@ -208,22 +211,22 @@
       });
     }
 
-    /* ─── 再スキャン（カメラは止めず、読み取りだけ再開）─── */
+    /* ─── カメラ生存確認 ─── */
+    function streamAlive() {
+      return currentStream &&
+             currentStream.getVideoTracks().some(t => t.readyState === 'live');
+    }
+
+    /* ─── 万一カメラが落ちていた場合のみ取り直す（通常は呼ばれない）─── */
     async function resumeScan() {
-      // ストリームが生きていればそのまま読み取りを再開（getUserMedia を呼ばない＝高速）
-      const live = currentStream &&
-                   currentStream.getVideoTracks().some(t => t.readyState === 'live');
       try {
-        if (!live) {
-          // 万一カメラが停止していた場合のみ取り直す
-          currentStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' } },
-            audio: false
-          });
-          video.srcObject = currentStream;
-          await video.play().catch(() => {});
-        }
-        if (!reader) reader = new BrowserQRCodeReader();
+        currentStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        });
+        video.srcObject = currentStream;
+        await video.play().catch(() => {});
+        reader = new BrowserQRCodeReader();
         reader.timeBetweenScansMillis = SCAN_INTERVAL_MS;
         startScan();
       } catch (err) {
@@ -288,12 +291,16 @@
       }
     }
 
-    /* ─── 1サイクル終了 → 結果を隠して次の読み取りへ ─── */
+    /* ─── 1サイクル終了 → 結果を隠して次の読み取りへ ───
+     *  カメラ・デコーダは動かしたままなので、busy を解除するだけで
+     *  即座に次のQRを受け付ける（カメラ再取得なし）。
+     *  万一カメラが落ちていたときだけ取り直す。
+     */
     function finishCycle(wait) {
       setTimeout(() => {
         hideResult();
         busy = false;
-        resumeScan();
+        if (!streamAlive()) resumeScan();
       }, wait);
     }
 
