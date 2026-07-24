@@ -92,6 +92,13 @@
       padding: 0 12px;
       text-shadow: 0 6px 30px rgba(0,0,0,.25);
       word-break: break-word;
+      white-space: pre-line;
+    }
+    .result .dismiss {
+      position: absolute;
+      bottom: 24px;
+      font-size: 13px;
+      color: rgba(255,255,255,.75);
     }
 
     /* ========== エラーバナー ========== */
@@ -124,6 +131,7 @@
     <div class="result" id="result">
       <div class="icon" id="resultIcon"></div>
       <div class="text" id="resultText"></div>
+      <div class="dismiss">タップですぐ次へ</div>
     </div>
 
     <div id="error-banner"></div>
@@ -137,12 +145,12 @@
     const GAS_URL = 'https://script.google.com/macros/s/AKfycbxBsc-V4H6M2LhphtKBf1ioO4DtEExY4ujza2htTLQjEmAwTs33ueCvTuRG9oJi1wIYMA/exec';
 
     /* ---- 速度パラメータ ---- */
-    const RESULT_HOLD_MS  = 700;    // 成功表示を出してから次の読み取りまでの保持時間
-    const ERROR_HOLD_MS   = 1500;   // エラー表示の保持時間
+    const RESULT_HOLD_MS  = 400;    // 成功表示の保持時間（タップで即閉じも可）
+    const ERROR_HOLD_MS   = 2500;   // エラー表示の保持時間（タップで即閉じも可）
     const CLIENT_GUARD_MS = 2500;   // 同一QRの即時連投防止
-    const REQ_TIMEOUT_MS  = 8000;   // 1回あたりの通信タイムアウト
-    const MAX_ATTEMPTS    = 3;      // 失敗時の再試行回数（この間はエラー画面を出さない）
-    const RETRY_DELAY_MS  = 600;    // 再試行の間隔
+    const REQ_TIMEOUT_MS  = 10000;  // 1回あたりの通信タイムアウト
+    const MAX_ATTEMPTS    = 3;      // busy・ネットワーク瞬断のときだけ再試行（タイムアウトは再試行しない）
+    const RETRY_DELAY_MS  = 800;    // 再試行の間隔（busy応答時はこの1.5倍待つ）
     const SCAN_INTERVAL_MS = 120;   // ZXing の読み取り間隔（短いほど高速）
 
     const { BrowserQRCodeReader, NotFoundException } = ZXing;
@@ -234,44 +242,103 @@
       }
     }
 
-    /* ─── QR読取 → GAS に送信 ─── */
+    /* ─── QR読取 → GAS に送信 ───
+     *  正常時の1サイクルは「送信(通常1〜3秒) → 完了表示0.4秒 → 即次の読み取り」で、
+     *  再試行やタイムアウトの設定は正常時の速度に一切影響しない。
+     *  再試行するのは「busy応答」「ネットワーク瞬断」「HTTP 5xx」のみ。
+     *  タイムアウトはサーバー側で処理が続いている可能性が高く、再試行すると
+     *  遅いサーバーへ追い打ちになるため再試行せず、すぐ案内を表示する。
+     */
     async function processResult(text) {
       showProcessing('出席確認中…');
 
-      let lastErrMsg = '';
+      let finalMsg = 'エラー';
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        let json = null;
-        try {
-          const url = GAS_URL
-            + '?action=append'
-            + '&data=' + encodeURIComponent(text);
+        const r = await tryOnce(text);
 
-          json = await fetchWithTimeout(url, REQ_TIMEOUT_MS);
-
-          if (json && json.status === 'ok') {
-            hideProcessing();
-            showResult('check', '出席確認完了');
-            finishCycle(RESULT_HOLD_MS);
-            return;
-          }
-          lastErrMsg = '書込エラー: ' + ((json && json.message) || '');
-        } catch (err) {
-          console.error('送信エラー:', err);
-          lastErrMsg = '通信失敗: ' + err.message;
+        if (r.ok) {
+          hideProcessing();
+          showResult('check', '出席確認完了');
+          finishCycle(RESULT_HOLD_MS);
+          return;
         }
 
-        // 試行回数が残っていれば、エラー画面を出さず「出席確認中…」のまま再試行する。
-        // （行追加・ロック待ちなどでサーバーが一時的に遅い間のエラー表示を防ぐ）
-        if (attempt < MAX_ATTEMPTS) {
-          await sleep(RETRY_DELAY_MS);
-          continue;
+        finalMsg = r.msg;
+
+        // 再試行しても直らないエラー（設定ミス・タイムアウト等）は即表示
+        if (!r.retryable || attempt === MAX_ATTEMPTS) break;
+
+        showProcessing('出席確認中…（再試行 ' + attempt + '）');
+        await sleep(r.wait || RETRY_DELAY_MS);
+      }
+
+      hideProcessing();
+      showResult('warn', finalMsg);
+      finishCycle(ERROR_HOLD_MS);
+    }
+
+    /* 1回分の送信。{ok:true} か {retryable, msg, wait} を返す */
+    async function tryOnce(text) {
+      try {
+        const url = GAS_URL + '?action=append&data=' + encodeURIComponent(text);
+        const json = await fetchWithTimeout(url, REQ_TIMEOUT_MS);
+
+        if (json && json.status === 'ok') return { ok: true };
+
+        if (json && json.status === 'busy') {
+          // サーバーは生きているが、他の書き込みのロック待ちで混雑中。
+          // 少し長めに待ってから再試行する価値がある。
+          return {
+            retryable: true,
+            wait: Math.round(RETRY_DELAY_MS * 1.5),
+            msg: '混雑しています\n少し待ってもう一度かざしてください'
+          };
         }
 
-        // すべての試行が失敗したときだけエラーを表示
-        hideProcessing();
-        showResult('warn', lastErrMsg);
-        finishCycle(ERROR_HOLD_MS);
-        return;
+        // GAS側で捕捉されたエラー（例: シートが見つかりません）。
+        // 設定起因なので再試行しても直らない → メッセージをそのまま表示。
+        return {
+          retryable: false,
+          msg: '記録エラー\n' + ((json && json.message) || '不明なエラー')
+        };
+
+      } catch (err) {
+        console.error('送信エラー:', err);
+
+        if (err.name === 'AbortError') {
+          // タイムアウト：サーバー側では処理が続いていて遅れて記録されることが多い。
+          // サーバーに30秒の同一QR重複防止があるため、もう一度かざしても二重記録されない。
+          return {
+            retryable: false,
+            msg: 'サーバー応答待ちタイムアウト（' + (REQ_TIMEOUT_MS / 1000) + '秒）\n' +
+                 '記録は遅れて完了している場合があります\n' +
+                 '少し待ってもう一度かざして確認してください'
+          };
+        }
+
+        if (err.kind === 'http') {
+          return {
+            retryable: err.httpStatus >= 500,   // 5xxは一時障害の可能性 → 再試行
+            msg: 'サーバーエラー（HTTP ' + err.httpStatus + '）\n' +
+                 (err.httpStatus >= 500
+                   ? 'Google側の一時的な障害の可能性があります'
+                   : 'GASのデプロイURL・設定を確認してください')
+          };
+        }
+
+        if (err.kind === 'badresponse') {
+          return {
+            retryable: false,
+            msg: 'サーバー応答が不正です（JSONではない応答）\n' +
+                 'GASのデプロイ設定「アクセスできるユーザー: 全員」を確認してください'
+          };
+        }
+
+        // fetch自体の失敗 ＝ 端末側のネットワーク問題が濃厚。瞬断なら再試行で直る。
+        return {
+          retryable: true,
+          msg: 'ネットワークエラー\nWi-Fi・電波状況を確認してください\n（' + err.message + '）'
+        };
       }
     }
 
@@ -284,8 +351,20 @@
       const timer = setTimeout(() => ctrl.abort(), ms);
       try {
         const res = await fetch(url, { redirect: 'follow', signal: ctrl.signal });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.json();
+        if (!res.ok) {
+          const e = new Error('HTTP ' + res.status);
+          e.kind = 'http';
+          e.httpStatus = res.status;
+          throw e;
+        }
+        try {
+          return await res.json();
+        } catch (parseErr) {
+          if (parseErr.name === 'AbortError') throw parseErr;  // 本文読込中のタイムアウト
+          const e = new Error('invalid response');
+          e.kind = 'badresponse';
+          throw e;
+        }
       } finally {
         clearTimeout(timer);
       }
@@ -293,15 +372,19 @@
 
     /* ─── 1サイクル終了 → 結果を隠して次の読み取りへ ───
      *  カメラ・デコーダは動かしたままなので、busy を解除するだけで
-     *  即座に次のQRを受け付ける（カメラ再取得なし）。
-     *  万一カメラが落ちていたときだけ取り直す。
+     *  即座に次のQRを受け付ける。結果画面はタップで即閉じできる。
      */
+    let cycleTimer = null;
     function finishCycle(wait) {
-      setTimeout(() => {
-        hideResult();
-        busy = false;
-        if (!streamAlive()) resumeScan();
-      }, wait);
+      clearTimeout(cycleTimer);
+      cycleTimer = setTimeout(closeResultNow, wait);
+    }
+
+    function closeResultNow() {
+      clearTimeout(cycleTimer);
+      hideResult();
+      busy = false;
+      if (!streamAlive()) resumeScan();
     }
 
     /* ─── UI ─── */
@@ -326,6 +409,9 @@
       errorBanner.style.display = 'block';
       console.error(msg);
     }
+
+    /* ─── 結果画面はタップで即閉じ → すぐ次の読み取りへ ─── */
+    resultEl.addEventListener('click', closeResultNow);
 
     /* ─── 起動 ─── */
     initCamera();
